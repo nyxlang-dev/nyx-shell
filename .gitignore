@@ -1,0 +1,6 @@
+nyx-shell
+script.nx
+script.ll
+packages/
+*.o
+.DS_Store
