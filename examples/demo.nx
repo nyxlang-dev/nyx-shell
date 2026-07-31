@@ -1,0 +1,96 @@
+// demo.nx — Minimal command executor using the same builtins as nyx-shell.
+//
+// This is NOT the shell itself (that's src/main.nx). This demo shows how
+// Nyx's process builtins work: fork, execvp, waitpid, pipes, and redirects.
+//
+// Usage:
+//   make compile FILE=products/shell/examples/demo.nx
+//   ./script_bin
+
+fn run_command(prog: String, args: Array) -> int {
+    let pid: int = fork()
+    if pid == 0 {
+        // Child: replace with the external command
+        execvp(prog, args)
+        // If execvp returns, the command was not found
+        print("command not found: " + prog)
+        exit(127)
+    }
+    // Parent: wait for child
+    let status: int = waitpid(pid, 0)
+    return status
+}
+
+fn run_pipeline(cmd1_prog: String, cmd1_args: Array, cmd2_prog: String, cmd2_args: Array) -> int {
+    let pipe_fds: Array = pipe_new()  // [read_fd, write_fd]
+    let read_fd: int = pipe_fds[0]
+    let write_fd: int = pipe_fds[1]
+
+    let pid1: int = fork()
+    if pid1 == 0 {
+        // First child: stdout → pipe write end
+        close_fd(read_fd)
+        dup2(write_fd, 1)
+        close_fd(write_fd)
+        execvp(cmd1_prog, cmd1_args)
+        exit(127)
+    }
+
+    let pid2: int = fork()
+    if pid2 == 0 {
+        // Second child: stdin ← pipe read end
+        close_fd(write_fd)
+        dup2(read_fd, 0)
+        close_fd(read_fd)
+        execvp(cmd2_prog, cmd2_args)
+        exit(127)
+    }
+
+    // Parent: close pipe, wait for both children
+    close_fd(read_fd)
+    close_fd(write_fd)
+    waitpid(pid1, 0)
+    let status: int = waitpid(pid2, 0)
+    return status
+}
+
+fn main() -> int {
+    print("=== Nyx process builtins demo ===")
+    print("")
+
+    // 1. Simple command execution
+    print("--- Running: echo hello from nyx ---")
+    var args: Array = ["echo", "hello", "from", "nyx"]
+    run_command("echo", args)
+
+    // 2. Get current directory
+    print("")
+    print("--- Current directory: " + getcwd() + " ---")
+
+    // 3. Pipeline: ls | head -5
+    print("")
+    print("--- Pipeline: ls | head -5 ---")
+    let ls_args: Array = ["ls"]
+    let head_args: Array = ["head", "-5"]
+    run_pipeline("ls", ls_args, "head", head_args)
+
+    // 4. Output redirect: echo → file
+    print("")
+    print("--- Redirect: echo > /tmp/nyx_demo.txt ---")
+    let pid: int = fork()
+    if pid == 0 {
+        let fd: int = open_fd("/tmp/nyx_demo.txt", 1)  // 1 = write
+        dup2(fd, 1)
+        close_fd(fd)
+        let echo_args: Array = ["echo", "written by nyx process builtins"]
+        execvp("echo", echo_args)
+        exit(127)
+    }
+    waitpid(pid, 0)
+    let content: String = read_file("/tmp/nyx_demo.txt")
+    print("File content: " + content)
+
+    print("")
+    print("=== Demo complete ===")
+    return 0
+}
