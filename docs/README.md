@@ -16,9 +16,9 @@ The shell is implemented in `src/main.nx` as a single file with these logical se
 | Parser | Builds command structures from tokens (pipes, redirects, conditionals) |
 | Variable expansion | `$VAR`, `${VAR}`, `$?` (last exit), `$$` (PID), tilde expansion |
 | Builtins | `cd`, `pwd`, `echo`, `export`, `unset`, `type`, `history`, `exit` |
-| Executor | `fork()` + `execvp()` + `waitpid()` for external commands |
-| Pipes | `pipe_new()` + `dup2()` for arbitrary-length pipelines |
-| Redirects | `open_fd()` + `dup2()` for `>`, `>>`, `<` |
+| Executor | `try_spawn()` + `try_child_wait()` (`std/process`) for external commands |
+| Pipes | `try_spawn_pipeline()` for arbitrary-length pipelines |
+| Redirects | `Stdio.File(path, "r"/"w"/"a")` for `<`, `>`, `>>` |
 | History | Persistent history in `~/.nyx_history`, arrow key navigation |
 | Line editor | Raw mode input with cursor movement, word delete, clear screen |
 | Main loop | Prompt → read line → tokenize → parse → execute cycle |
@@ -27,12 +27,7 @@ The shell is implemented in `src/main.nx` as a single file with these logical se
 
 These Nyx builtins power the shell's POSIX functionality:
 
-- `fork()` — create child process
-- `execvp(prog, args)` — replace child with external command
-- `waitpid(pid, opts)` — wait for child to finish, get exit status
-- `dup2(old_fd, new_fd)` — redirect file descriptors (pipes, redirects)
-- `pipe_new()` — create pipe (returns array `[read_fd, write_fd]`)
-- `open_fd(path, mode)` / `close_fd(fd)` — file descriptor operations
+- `std/process`: `spawn_opts()`, `try_spawn`, `try_spawn_pipeline`, `try_child_wait`, `Stdio`
 - `getcwd()` / `chdir(path)` — working directory
 - `getenv(name)` / `setenv(name, val)` — environment variables
 - `getpid()` — process ID for `$$` expansion
@@ -46,4 +41,3 @@ These Nyx builtins power the shell's POSIX functionality:
 - No heredocs (`<<EOF`)
 - No command substitution (`$(cmd)` or backticks)
 - No arithmetic expansion (`$((1+2))`)
-- `fork()` + GC constraint: child must call `execvp()` immediately

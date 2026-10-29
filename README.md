@@ -1,8 +1,8 @@
 # nyx-shell
 
-A POSIX-compatible interactive shell written entirely in Nyx (~1175 lines, single file). Demonstrates Nyx's process control builtins (fork, execvp, waitpid, dup2, pipe) with no FFI or C glue code.
+A POSIX-compatible interactive shell written entirely in Nyx (~1175 lines, single file). Demonstrates Nyx's process control (std/process: try_spawn, try_spawn_pipeline) with no FFI or C glue code.
 
-Shell interactivo compatible con POSIX escrito completamente en Nyx (~1175 líneas, archivo único). Demuestra los builtins de control de procesos de Nyx (fork, execvp, waitpid, dup2, pipe) sin FFI ni código C adicional.
+Shell interactivo compatible con POSIX escrito completamente en Nyx (~1175 líneas, archivo único). Demuestra el control de procesos de Nyx (std/process: try_spawn, try_spawn_pipeline) sin FFI ni código C adicional.
 
 ---
 
@@ -34,7 +34,7 @@ nyx shell                          # via Nyx wrapper
 
 ## Features
 
-- **External commands**: PATH lookup + fork + execvp + waitpid
+- **External commands**: PATH lookup + std/process (try_spawn)
 - **Pipes**: `cmd1 | cmd2 | cmd3` — arbitrary pipeline length
 - **Redirects**: `>`, `>>`, `<`
 - **Conditionals**: `&&` (run on success), `||` (run on failure)
