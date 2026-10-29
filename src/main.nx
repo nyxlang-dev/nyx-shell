@@ -671,8 +671,8 @@ fn out_raw(s: String) {
 }
 
 // Corre un builtin cuya salida va a un archivo (`echo hi > f`, `pwd >> f`).
-// Sin fork: se captura el texto y se lo entrega a un `cat` con el archivo como
-// stdout (modo "w" o "a"), que es lo que hacía el hijo con dup2.
+// Sin fork: se captura el texto y se escribe directo con file_open en modo
+// "w" (`>`) o "a" (`>>`); file_open devuelve 0 si no pudo abrir.
 fn run_builtin_redirected(cmd: SimpleCommand) -> int {
     g_capture = true
     g_capbuf = ""
@@ -681,21 +681,17 @@ fn run_builtin_redirected(cmd: SimpleCommand) -> int {
     let text: String = g_capbuf
     g_capbuf = ""
 
-    var opts = spawn_opts()
-    opts.stdin = Stdio.Pipe
-    opts.stdout = stdout_of(cmd)
-    match try_spawn(["cat"], opts) {
-        Result.Ok(c) => {
-            let _w = try_child_write(c, text)
-            let _x = try_child_close_stdin(c)
-            let _y = try_child_wait(c)
-            return rc
-        }
-        Result.Err(e) => {
-            print("nyx-shell: " + cmd.stdout_file + ": Cannot open")
-            return 1
-        }
+    var mode = "w"
+    if cmd.stdout_append {
+        mode = "a"
     }
+    let f = file_open(cmd.stdout_file, mode)
+    if f == 0 {
+        print("nyx-shell: " + cmd.stdout_file + ": Cannot open")
+        return 1
+    }
+    file_write_string(f, text)
+    file_close(f)
     return rc
 }
 
