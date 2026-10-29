@@ -342,16 +342,36 @@ fn split_by_pipe(tokens: Array) -> Array {
 
 // ===== PATH LOOKUP =====
 
+// Windows: PATH se separa con ';' y el nombre se completa con PATHEXT, igual
+// que lo resuelve try_spawn. Nyx no expone la plataforma: OS=Windows_NT es la
+// variable que Windows define siempre.
+fn path_is_file(p: String) -> bool {
+    let st: Array = stat(p)
+    if st.length() > 0 {
+        let size: int = st[0]
+        return size >= 0
+    }
+    return false
+}
+
+fn find_with_ext(base: String, exts: Array) -> String {
+    if path_is_file(base) { return base }
+    for e: String in exts {
+        if path_is_file(base + e) { return base + e }
+    }
+    return ""
+}
+
 fn find_in_path(cmd: String) -> String {
-    if cmd.contains("/") {
-        let st: Array = stat(cmd)
-        if st.length() > 0 {
-            let size: int = st[0]
-            if size >= 0 {
-                return cmd
-            }
-        }
-        return ""
+    let windows: bool = getenv("OS") == "Windows_NT"
+    var exts: Array = []
+    if windows {
+        var pe: String = getenv("PATHEXT")
+        if pe == "" { pe = ".COM;.EXE" }
+        exts = pe.split(";")
+    }
+    if cmd.contains("/") or (windows and cmd.contains("\\")) {
+        return find_with_ext(cmd, exts)
     }
 
     let path_str: String = getenv("PATH")
@@ -359,17 +379,15 @@ fn find_in_path(cmd: String) -> String {
         return ""
     }
 
-    let dirs: Array = path_str.split(":")
+    var sep: String = ":"
+    if windows { sep = ";" }
+    let dirs: Array = path_str.split(sep)
     var i = 0
     while i < dirs.length() {
         let dir: String = dirs[i]
-        let full: String = dir + "/" + cmd
-        let st: Array = stat(full)
-        if st.length() > 0 {
-            let size: int = st[0]
-            if size >= 0 {
-                return full
-            }
+        if dir != "" {
+            let full: String = find_with_ext(dir + "/" + cmd, exts)
+            if full != "" { return full }
         }
         i = i + 1
     }
