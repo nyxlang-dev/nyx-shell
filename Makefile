@@ -12,6 +12,7 @@ build:
 
 test-shell: build
 	bash tests/smoke.sh
+	bash tests/spawn.sh
 
 clean:
 	rm -f nyx-shell script.nx script.ll nyx.lock

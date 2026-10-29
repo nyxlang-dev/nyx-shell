@@ -1,12 +1,12 @@
 // nyx-shell — Interactive POSIX shell written in Nyx
-// Uses process builtins: fork, execvp, waitpid, dup2, pipe_new, close_fd,
-//   getcwd, chdir, getpid, getenv, setenv, isatty, open_fd
+// Spawns children with std/process (try_spawn, try_spawn_pipeline); no fork.
+// Uses builtins: getcwd, chdir, getpid, getenv, setenv, isatty, stat
 // Uses terminal builtins: raw_mode_enter/exit, read_byte, term_cols, chr
 //
 // Features:
 //   - Interactive prompt (user@host:cwd$)
 //   - Built-in commands: cd, pwd, exit, export, echo, history, type, unset
-//   - External command execution via fork+execvp+waitpid
+//   - External command execution via std/process (try_spawn)
 //   - PATH lookup for commands
 //   - Pipes (cmd1 | cmd2 | cmd3)
 //   - Output redirect (cmd > file, cmd >> file)
@@ -17,6 +17,9 @@
 //   - Environment variable expansion ($VAR, ${VAR})
 //   - Command history with arrow keys (persistent ~/.nyx_history)
 //   - Line editing (arrows, home/end, backspace, delete, Ctrl+A/E/K/U/W/L)
+
+import "std/error"
+import "std/process"
 
 // ===== CONSTANTS =====
 
@@ -409,7 +412,7 @@ fn builtin_cd(args: Array) -> int {
 }
 
 fn builtin_pwd(args: Array) -> int {
-    print(getcwd())
+    out_line(getcwd())
     return 0
 }
 
@@ -438,9 +441,9 @@ fn builtin_echo(args: Array) -> int {
     }
 
     if no_newline {
-        print_no_newline(output)
+        out_raw(output)
     } else {
-        print(output)
+        out_line(output)
     }
     return 0
 }
@@ -489,20 +492,20 @@ fn builtin_unset(args: Array) -> int {
 
 fn builtin_type(args: Array) -> int {
     if args.length() < 2 {
-        print("type: usage: type command")
+        out_line("type: usage: type command")
         return 1
     }
     let cmd: String = args[1]
     if is_builtin(cmd) {
-        print(cmd + " is a shell builtin")
+        out_line(cmd + " is a shell builtin")
         return 0
     }
     let found: String = find_in_path(cmd)
     if found != "" {
-        print(cmd + " is " + found)
+        out_line(cmd + " is " + found)
         return 0
     }
-    print("type: " + cmd + ": not found")
+    out_line("type: " + cmd + ": not found")
     return 1
 }
 
@@ -511,7 +514,7 @@ fn builtin_history(args: Array) -> int {
     while i < g_history.length() {
         let entry: String = g_history[i]
         let num: String = int_to_string(i + 1)
-        print("  " + num + "  " + entry)
+        out_line("  " + num + "  " + entry)
         i = i + 1
     }
     return 0
@@ -565,6 +568,59 @@ fn run_builtin(args: Array) -> int {
 }
 
 // ===== EXTERNAL COMMAND EXECUTION =====
+//
+// Los procesos hijos se lanzan con std/process (try_spawn / try_spawn_pipeline),
+// no con fork+execvp: las redirecciones `<`, `>` y `>>` son Stdio.File y los
+// pipes los arma try_spawn_pipeline.
+
+// Stdio de las redirecciones de un comando simple.
+fn stdin_of(cmd: SimpleCommand) -> Stdio {
+    if cmd.stdin_file != "" {
+        return Stdio.File(cmd.stdin_file, "r")
+    }
+    return Stdio.Inherit
+}
+
+fn stdout_of(cmd: SimpleCommand) -> Stdio {
+    if cmd.stdout_file != "" {
+        if cmd.stdout_append {
+            return Stdio.File(cmd.stdout_file, "a")
+        }
+        return Stdio.File(cmd.stdout_file, "w")
+    }
+    return Stdio.Inherit
+}
+
+// Traduce un Err de try_spawn al mensaje y al código de salida del shell.
+// std/process no distingue por kind un archivo de redirección que no abre de
+// un programa inexistente (los dos son not_found), así que se mira el msg.
+fn report_spawn_error(e: Error, program: String, stdin_file: String, stdout_file: String) -> int {
+    if e.msg.contains(": no se pudo preparar stdin") {
+        print("nyx-shell: " + stdin_file + ": No such file or directory")
+        return 1
+    }
+    if e.msg.contains(": no se pudo preparar stdout") {
+        print("nyx-shell: " + stdout_file + ": Cannot open")
+        return 1
+    }
+    if e.kind == "not_found" {
+        print("nyx-shell: " + program + ": command not found")
+        return 127
+    }
+    print("nyx-shell: " + program + ": exec failed")
+    return 126
+}
+
+fn wait_code(c: Child) -> int {
+    match try_child_wait(c) {
+        Result.Ok(code) => { return code }
+        Result.Err(e) => {
+            print("nyx-shell: wait failed: " + e.msg)
+            return 1
+        }
+    }
+    return 1
+}
 
 fn exec_external(cmd: SimpleCommand) -> int {
     let program: String = cmd.args[0]
@@ -574,46 +630,14 @@ fn exec_external(cmd: SimpleCommand) -> int {
         return 127
     }
 
-    let child: int = fork()
-    if child == 0 {
-        // Child process — handle redirects then exec
-
-        if cmd.stdin_file != "" {
-            let fd: int = open_fd(cmd.stdin_file, 0)
-            if fd < 0 {
-                print("nyx-shell: " + cmd.stdin_file + ": No such file or directory")
-                exit(1)
-            }
-            dup2(fd, 0)
-            close_fd(fd)
-        }
-
-        if cmd.stdout_file != "" {
-            var fd: int = 0
-            if cmd.stdout_append {
-                fd = open_fd(cmd.stdout_file, 2)
-            } else {
-                fd = open_fd(cmd.stdout_file, 1)
-            }
-            if fd < 0 {
-                print("nyx-shell: " + cmd.stdout_file + ": Cannot open")
-                exit(1)
-            }
-            dup2(fd, 1)
-            close_fd(fd)
-        }
-
-        execvp(resolved, cmd.args)
-        print("nyx-shell: " + resolved + ": exec failed")
-        exit(126)
+    var opts = spawn_opts()
+    opts.stdin = stdin_of(cmd)
+    opts.stdout = stdout_of(cmd)
+    match try_spawn(cmd.args, opts) {
+        Result.Ok(child) => { return wait_code(child) }
+        Result.Err(e) => { return report_spawn_error(e, resolved, cmd.stdin_file, cmd.stdout_file) }
     }
-
-    if child < 0 {
-        print("nyx-shell: fork failed")
-        return 1
-    }
-    let status: int = waitpid(child, 0)
-    return status
+    return 1
 }
 
 fn builtin_needs_parent(cmd: String) -> bool {
@@ -625,46 +649,66 @@ fn builtin_needs_parent(cmd: String) -> bool {
     return false
 }
 
+// Salida de los builtins: con g_capture activo va a g_capbuf en vez de a la
+// terminal, para poder redirigirla a un archivo sin hacer fork.
+var g_capture: bool = false
+var g_capbuf: String = ""
+
+fn out_line(s: String) {
+    if g_capture {
+        g_capbuf = g_capbuf + s + "\n"
+    } else {
+        print(s)
+    }
+}
+
+fn out_raw(s: String) {
+    if g_capture {
+        g_capbuf = g_capbuf + s
+    } else {
+        print_no_newline(s)
+    }
+}
+
+// Corre un builtin cuya salida va a un archivo (`echo hi > f`, `pwd >> f`).
+// Sin fork: se captura el texto y se lo entrega a un `cat` con el archivo como
+// stdout (modo "w" o "a"), que es lo que hacía el hijo con dup2.
+fn run_builtin_redirected(cmd: SimpleCommand) -> int {
+    g_capture = true
+    g_capbuf = ""
+    let rc: int = run_builtin(cmd.args)
+    g_capture = false
+    let text: String = g_capbuf
+    g_capbuf = ""
+
+    var opts = spawn_opts()
+    opts.stdin = Stdio.Pipe
+    opts.stdout = stdout_of(cmd)
+    match try_spawn(["cat"], opts) {
+        Result.Ok(c) => {
+            let _w = try_child_write(c, text)
+            let _x = try_child_close_stdin(c)
+            let _y = try_child_wait(c)
+            return rc
+        }
+        Result.Err(e) => {
+            print("nyx-shell: " + cmd.stdout_file + ": Cannot open")
+            return 1
+        }
+    }
+    return rc
+}
+
 fn exec_command(cmd: SimpleCommand) -> int {
     if cmd.args.length() == 0 {
         return 0
     }
 
     let program: String = cmd.args[0]
-    let has_redirect: bool = cmd.stdout_file != "" or cmd.stdin_file != ""
 
     if is_builtin(program) {
-        if has_redirect and not builtin_needs_parent(program) {
-            // Fork so redirects work for builtins like echo, pwd
-            let child: int = fork()
-            if child == 0 {
-                if cmd.stdout_file != "" {
-                    var fd: int = 0
-                    if cmd.stdout_append {
-                        fd = open_fd(cmd.stdout_file, 2)
-                    } else {
-                        fd = open_fd(cmd.stdout_file, 1)
-                    }
-                    if fd >= 0 {
-                        dup2(fd, 1)
-                        close_fd(fd)
-                    }
-                }
-                if cmd.stdin_file != "" {
-                    let fd: int = open_fd(cmd.stdin_file, 0)
-                    if fd >= 0 {
-                        dup2(fd, 0)
-                        close_fd(fd)
-                    }
-                }
-                let rc: int = run_builtin(cmd.args)
-                exit(rc)
-            }
-            if child < 0 {
-                return 1
-            }
-            let status: int = waitpid(child, 0)
-            return status
+        if cmd.stdout_file != "" and not builtin_needs_parent(program) {
+            return run_builtin_redirected(cmd)
         }
         return run_builtin(cmd.args)
     }
@@ -681,118 +725,60 @@ fn exec_pipeline(commands: Array) -> int {
         return exec_command(cmd)
     }
 
-    // Create n-1 pipes
-    var pipe_fds: Array = []
-    var pi = 0
-    while pi < n - 1 {
-        let p: Array = pipe_new()
-        pipe_fds.push(p)
-        pi = pi + 1
-    }
-
-    var pids: Array = []
+    // Todos los programas tienen que existir antes de lanzar el primero.
+    var argvs: Array = []
     var ci = 0
     while ci < n {
         let cmd: SimpleCommand = commands[ci]
-        if cmd.args.length() == 0 {
-            ci = ci + 1
-            continue
+        if cmd.args.length() > 0 {
+            let program: String = cmd.args[0]
+            if find_in_path(program) == "" {
+                print("nyx-shell: " + program + ": command not found")
+                return 127
+            }
+            argvs.push(cmd.args)
         }
-        let program: String = cmd.args[0]
-        let resolved: String = find_in_path(program)
-
-        if resolved == "" {
-            print("nyx-shell: " + program + ": command not found")
-            // Close all pipes
-            var cpi = 0
-            while cpi < pipe_fds.length() {
-                let pfds: Array = pipe_fds[cpi]
-                let rfd: int = pfds[0]
-                let wfd: int = pfds[1]
-                close_fd(rfd)
-                close_fd(wfd)
-                cpi = cpi + 1
-            }
-            return 127
-        }
-
-        let child: int = fork()
-        if child == 0 {
-            // Set up pipe redirects
-            if ci > 0 {
-                let prev_pipe: Array = pipe_fds[ci - 1]
-                let rfd: int = prev_pipe[0]
-                dup2(rfd, 0)
-            }
-            if ci < n - 1 {
-                let next_pipe: Array = pipe_fds[ci]
-                let wfd: int = next_pipe[1]
-                dup2(wfd, 1)
-            }
-
-            // Close all pipe fds in child
-            var cpi = 0
-            while cpi < pipe_fds.length() {
-                let pfds: Array = pipe_fds[cpi]
-                let rfd: int = pfds[0]
-                let wfd: int = pfds[1]
-                close_fd(rfd)
-                close_fd(wfd)
-                cpi = cpi + 1
-            }
-
-            // File redirects for first/last in pipeline
-            if cmd.stdin_file != "" and ci == 0 {
-                let fd: int = open_fd(cmd.stdin_file, 0)
-                if fd >= 0 {
-                    dup2(fd, 0)
-                    close_fd(fd)
-                }
-            }
-            if cmd.stdout_file != "" and ci == n - 1 {
-                var fd: int = 0
-                if cmd.stdout_append {
-                    fd = open_fd(cmd.stdout_file, 2)
-                } else {
-                    fd = open_fd(cmd.stdout_file, 1)
-                }
-                if fd >= 0 {
-                    dup2(fd, 1)
-                    close_fd(fd)
-                }
-            }
-
-            execvp(resolved, cmd.args)
-            exit(126)
-        }
-
-        pids.push(child)
         ci = ci + 1
     }
-
-    // Parent: close all pipe fds
-    var cpi = 0
-    while cpi < pipe_fds.length() {
-        let pfds: Array = pipe_fds[cpi]
-        let rfd: int = pfds[0]
-        let wfd: int = pfds[1]
-        close_fd(rfd)
-        close_fd(wfd)
-        cpi = cpi + 1
+    if argvs.length() == 0 {
+        return 0
     }
 
-    // Wait for all children — return exit code of last
-    var last_status = 0
-    var wi = 0
-    while wi < pids.length() {
-        let pid: int = pids[wi]
-        let status: int = waitpid(pid, 0)
-        if wi == pids.length() - 1 {
-            last_status = status
+    // `<` solo vale en el primero y `>`/`>>` en el último.
+    var opts = spawn_opts()
+    var in_file = ""
+    var out_file = ""
+    let first: SimpleCommand = commands[0]
+    if first.args.length() > 0 {
+        opts.stdin = stdin_of(first)
+        in_file = first.stdin_file
+    }
+    let last: SimpleCommand = commands[n - 1]
+    if last.args.length() > 0 {
+        opts.stdout = stdout_of(last)
+        out_file = last.stdout_file
+    }
+
+    match try_spawn_pipeline(argvs, opts) {
+        Result.Ok(children) => {
+            // Esperar a todos; el código es el del último.
+            var last_status = 0
+            var wi = 0
+            while wi < children.length() {
+                let c: Child = children[wi]
+                let status: int = wait_code(c)
+                if wi == children.length() - 1 {
+                    last_status = status
+                }
+                wi = wi + 1
+            }
+            return last_status
         }
-        wi = wi + 1
+        Result.Err(e) => {
+            return report_spawn_error(e, "pipeline", in_file, out_file)
+        }
     }
-    return last_status
+    return 1
 }
 
 // ===== COMMAND LINE EXECUTION =====
