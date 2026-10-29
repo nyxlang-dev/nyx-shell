@@ -592,14 +592,14 @@ fn stdout_of(cmd: SimpleCommand) -> Stdio {
 }
 
 // Traduce un Err de try_spawn al mensaje y al código de salida del shell.
-// std/process no distingue por kind un archivo de redirección que no abre de
-// un programa inexistente (los dos son not_found), así que se mira el msg.
+// Un archivo de redirección que no abre y un programa inexistente dan los dos
+// not_found: los separa e.stage ("stdin"/"stdout" contra "exec"), no el kind.
 fn report_spawn_error(e: Error, program: String, stdin_file: String, stdout_file: String) -> int {
-    if e.msg.contains(": no se pudo preparar stdin") {
+    if e.stage == "stdin" {
         print("nyx-shell: " + stdin_file + ": No such file or directory")
         return 1
     }
-    if e.msg.contains(": no se pudo preparar stdout") {
+    if e.stage == "stdout" {
         print("nyx-shell: " + stdout_file + ": Cannot open")
         return 1
     }
